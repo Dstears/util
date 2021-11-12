@@ -10,6 +10,10 @@
         <java.version>1.8</java.version>
         <lombok.version>1.18.22</lombok.version>
     </properties>
+
+    <name>util</name>
+    <url>https://github.com/Dstears/util</url>
+    <description>Some utils</description>
     <dependencies>
         <dependency>
             <groupId>com.sun</groupId>
