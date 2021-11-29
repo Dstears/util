@@ -1,14 +1,12 @@
 package dstears.github.io.util.checker;
 
-import com.sun.tools.javac.file.JavacFileManager;
-import com.sun.tools.javac.parser.JavacParser;
-import com.sun.tools.javac.parser.ParserFactory;
 import com.sun.tools.javac.tree.JCTree;
-import com.sun.tools.javac.util.Context;
+import dstears.github.io.util.checker.model.CheckerResult;
+import dstears.github.io.util.checker.model.JavaStandardCheckerType;
 import dstears.github.io.util.common.FileUtil;
+import dstears.github.io.util.common.JavaParseUtil;
+import dstears.github.io.util.common.RequestUrlUtil;
 
-import java.io.BufferedReader;
-import java.io.FileReader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -21,17 +19,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-public class JavaStandardChecker {
+public class JavaStandardChecker extends AbstractChecker {
 
-
-    public static void main(String[] args) throws Exception {
-        String filePath = "/Users/wangxiaolei/Documents/ody/code/baseline/web/crm/crm3.0.0-siduantongyi";
-        Map<String, List<CheckerResult>> run = new JavaStandardChecker().run(filePath);
-        for (Map.Entry<String, List<CheckerResult>> entry : run.entrySet()) {
-            System.out.println(entry.getKey() + " 异常：");
-            entry.getValue().forEach(System.out::println);
-        }
-    }
 
     private final Pattern PACKAGE_PATTERN = Pattern.compile(".*frontapi[^;]*model.*");
     private final Pattern CONTROLLER_PATTERN = Pattern.compile(".*frontapi[^;]*controller.*");
@@ -52,49 +41,37 @@ public class JavaStandardChecker {
             "Boolean",
             "Character",
             "String");
-    private final ParserFactory PARSER_FACTORY;
-    private final Map<String, List<CheckerResult>> errors = new HashMap<>();
 
-    public JavaStandardChecker() {
-        Context context = new Context();
-        JavacFileManager.preRegister(context);
-        PARSER_FACTORY = ParserFactory.instance(context);
-    }
-
-
-    public Map<String, List<CheckerResult>> run(String filePath) throws Exception {
+    public Map<String, List<CheckerResult>> run(String filePath) {
 
         List<String> files = FileUtil.listFile(filePath);
         files = files
                 .stream()
                 .filter(i -> i.endsWith(".java")).collect(Collectors.toList());
         for (String file : files) {
+            Optional<JCTree.JCCompilationUnit> parse = JavaParseUtil.parse(file);
 
+            if (!parse.isPresent()) {
+                String replace = file.replace(filePath, "");
 
-            try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-
-                StringBuilder builder = new StringBuilder();
-                String s;
-                while ((s = reader.readLine()) != null) {
-                    builder.append(s).append("\n");
-                }
-                String fileContent = builder.toString();
-                JavacParser javacParser = PARSER_FACTORY.newParser(fileContent, true, false, true);
-
-                JCTree.JCCompilationUnit jcCompilationUnit = javacParser.parseCompilationUnit();
-
-                if (jcCompilationUnit.pid == null) {
-                    String replace = file.replace(filePath, "");
-                    putErrors(replace.substring(replace.indexOf("com" + System.getProperty("file.separator"))), Collections.singletonList(new CheckerResult("文件被整个注释掉了！！！请删除", JavaStandardCheckerType.FILE)));
-                    continue;
-                }
-                siduantongyiModel(jcCompilationUnit);
-                siduantongyiMethod(jcCompilationUnit);
-
+                CheckerResult checkerResult = new CheckerResult("解析文件失败", JavaStandardCheckerType.FILE);
+                checkerResult.setKey(replace.substring(replace.indexOf("com" + System.getProperty("file.separator"))));
+                putErrors(file, Collections.singletonList(checkerResult));
+                continue;
             }
 
+            JCTree.JCCompilationUnit jcCompilationUnit = parse.get();
+
+            if (jcCompilationUnit.pid == null) {
+                String replace = file.replace(filePath, "");
+                putErrors(replace.substring(replace.indexOf("com" + System.getProperty("file.separator"))), Collections.singletonList(new CheckerResult("文件被整个注释掉了！！！请删除", JavaStandardCheckerType.FILE)));
+                continue;
+            }
+            siduantongyiModel(file, jcCompilationUnit);
+            siduantongyiMethod(file, jcCompilationUnit);
+
+
         }
-        errors.forEach((k, v) -> v.forEach(i -> i.setKey(k)));
         return errors;
     }
 
@@ -115,12 +92,17 @@ public class JavaStandardChecker {
      * 12、get方法入参基本类型和dto不能同时存在
      * 13、get方法是dto的时候只能有一个入参
      */
-    private void siduantongyiMethod(JCTree.JCCompilationUnit jcCompilationUnit) {
+    private void siduantongyiMethod(String file, JCTree.JCCompilationUnit jcCompilationUnit) {
         List<CheckerResult> error = new ArrayList<>();
         String packageName = jcCompilationUnit.pid.toString();
         Matcher packageMatcher = CONTROLLER_PATTERN.matcher(packageName);
         if (packageMatcher.find()) {
-            JCTree.JCClassDecl jcTree = (JCTree.JCClassDecl) jcCompilationUnit.defs.stream().filter(i -> i instanceof JCTree.JCClassDecl).findAny().get();
+            Optional<JCTree.JCClassDecl> classDecl = JavaParseUtil.getClassDecl(jcCompilationUnit);
+            if (!classDecl.isPresent()) {
+                error.add(new CheckerResult("找不到类的body", JavaStandardCheckerType.FILE));
+                return;
+            }
+            JCTree.JCClassDecl jcTree = classDecl.get();
             String className = jcTree.name.toString();
             String mods = jcTree.mods.toString();
             boolean isAbstract = mods.contains("abstract");
@@ -147,28 +129,18 @@ public class JavaStandardChecker {
                 error.add(new CheckerResult("没有RequestMapping注解，这怎么运行起来的？？？？？", JavaStandardCheckerType.METHOD_ANNOTATION));
                 return;
             }
-            String requestMappingValue = "";
-            for (JCTree.JCExpression arg : requestMapping.args) {
-                if (arg instanceof JCTree.JCLiteral) {
-                    requestMappingValue = ((JCTree.JCLiteral) arg).value.toString();
-                } else {
-                    JCTree.JCAssign jcAssign = (JCTree.JCAssign) arg;
-                    if ("value".equals(((JCTree.JCIdent) jcAssign.lhs).name.toString())) {
-                        requestMappingValue = ((JCTree.JCLiteral) jcAssign.rhs).value.toString();
-                    }
-                }
-            }
-            if (!requestMappingValue.startsWith("/")) {
-                requestMappingValue = "/" + requestMappingValue;
-            }
-            if (requestMappingValue.endsWith("/")) {
-                requestMappingValue = requestMappingValue.substring(0, requestMappingValue.length() - 1);
+            Optional<String> value = JavaParseUtil.getAssignValue("value", requestMapping);
+            String requestMappingValue;
+            if (value.isPresent()) {
+                requestMappingValue = RequestUrlUtil.format(value.get());
+            } else {
+                requestMappingValue = "";
             }
 
             if (api == null) {
                 error.add(new CheckerResult("没有Api注解", JavaStandardCheckerType.CLASS_ANNOTATION));
             } else {
-                Optional<String> tags = getAssignValue("tags", api);
+                Optional<String> tags = JavaParseUtil.getAssignValue("tags", api);
                 if (!tags.isPresent()) {
                     error.add(new CheckerResult("api注解没有tags属性", JavaStandardCheckerType.CLASS_ANNOTATION));
                 } else {
@@ -180,146 +152,139 @@ public class JavaStandardChecker {
                 }
             }
 
-            for (JCTree def : jcTree.defs) {
-                if (def instanceof JCTree.JCMethodDecl) {
-                    JCTree.JCMethodDecl method = (JCTree.JCMethodDecl) def;
+            for (JCTree.JCMethodDecl method : JavaParseUtil.getClassMethod(jcCompilationUnit)) {
 
-                    String methodName = method.name.toString();
+                String methodName = method.name.toString();
 
 
-                    if (getAnnotation("RequestMapping", method.mods).isPresent()) {
-                        error.add(new CheckerResult(methodName + "不允许使用RequestMapping注解", JavaStandardCheckerType.METHOD_ANNOTATION));
-                    } else {
-                        JCTree.JCAnnotation mapping = null;
-                        JCTree.JCAnnotation apiOperation = null;
+                if (JavaParseUtil.getAnnotation("RequestMapping", method.mods).isPresent()) {
+                    error.add(new CheckerResult(methodName + "不允许使用RequestMapping注解", JavaStandardCheckerType.METHOD_ANNOTATION));
+                } else {
+                    JCTree.JCAnnotation mapping = null;
+                    JCTree.JCAnnotation apiOperation = null;
 
-                        for (JCTree.JCAnnotation annotation : method.mods.annotations) {
-                            if (Arrays.asList("GetMapping", "PostMapping").contains(annotation.annotationType.toString())) {
-                                mapping = annotation;
+                    for (JCTree.JCAnnotation annotation : method.mods.annotations) {
+                        if (Arrays.asList("GetMapping", "PostMapping").contains(annotation.annotationType.toString())) {
+                            mapping = annotation;
+                        }
+
+                        if (Objects.equals(annotation.annotationType.toString(), "ApiOperation")) {
+                            apiOperation = annotation;
+                        }
+                    }
+                    boolean isPost;
+                    if (mapping != null) {
+                        isPost = mapping.annotationType.toString().equals("PostMapping");
+
+                        Optional<String> urlPre = JavaParseUtil.getAssignValue("value", mapping);
+
+                        if (!urlPre.isPresent()) {
+                            error.add(new CheckerResult(methodName + "mapping注解没有value", JavaStandardCheckerType.METHOD_ANNOTATION));
+                        } else {
+                            Matcher matcher = URL_PATTERN.matcher(packageName);
+                            if (!matcher.find()) {
+                                error.add(new CheckerResult("包名不正确", JavaStandardCheckerType.PACKAGE));
+                            }
+                            String urlP = matcher.group();
+                            boolean hasMatch = false;
+                            for (String s : urlPre.get().split(",")) {
+                                s = RequestUrlUtil.format(s);
+                                String fullUrl = requestMappingValue + s;
+                                if (fullUrl.contains("/" + urlP + "/")) {
+                                    hasMatch = true;
+                                    break;
+                                }
+
                             }
 
-                            if (Objects.equals(annotation.annotationType.toString(), "ApiOperation")) {
-                                apiOperation = annotation;
+
+                            if (!hasMatch) {
+                                error.add(new CheckerResult(methodName + " url不正确", JavaStandardCheckerType.METHOD_ANNOTATION));
+                            }
+
+
+                        }
+                        if (apiOperation == null) {
+                            error.add(new CheckerResult(methodName + "没有ApiOperation注解", JavaStandardCheckerType.METHOD_ANNOTATION));
+                        } else {
+                            Optional<String> apiOperationValue = JavaParseUtil.getAssignValue("value", apiOperation);
+                            if (!apiOperationValue.isPresent()) {
+                                error.add(new CheckerResult(methodName + " ApiOperation注解没有value", JavaStandardCheckerType.METHOD_ANNOTATION));
+                            } else {
+                                if (apiOperationValueList.contains(apiOperationValue.get())) {
+                                    error.add(new CheckerResult(methodName + " ApiOperation注解的value：" + apiOperationValue.get() + "重复", JavaStandardCheckerType.METHOD_ANNOTATION));
+                                } else {
+                                    apiOperationValueList.add(apiOperationValue.get());
+                                }
                             }
                         }
-                        boolean isPost;
-                        if (mapping != null) {
-                            isPost = mapping.annotationType.toString().equals("PostMapping");
 
-                            Optional<String> urlPre = getAssignValue("value", mapping);
-
-                            if (!urlPre.isPresent()) {
-                                error.add(new CheckerResult(methodName + "mapping注解没有value", JavaStandardCheckerType.METHOD_ANNOTATION));
-                            } else {
-                                Matcher matcher = URL_PATTERN.matcher(packageName);
-                                if (!matcher.find()) {
-                                    error.add(new CheckerResult("包名不正确", JavaStandardCheckerType.PACKAGE));
-                                }
-                                String urlP = matcher.group();
-                                boolean hasMatch = false;
-                                for (String s : urlPre.get().split(",")) {
-                                    if (!s.startsWith("/")) {
-                                        s = "/" + s;
-                                    }
-                                    if (s.endsWith("/")) {
-                                        s = s.substring(0, s.length() - 1);
-                                    }
-                                    String fullUrl = requestMappingValue + s;
-                                    if (fullUrl.contains("/" + urlP + "/")) {
-                                        hasMatch = true;
-                                        break;
-                                    }
-
-                                }
-
-
-                                if (!hasMatch) {
-                                    error.add(new CheckerResult(methodName + " url不正确", JavaStandardCheckerType.METHOD_ANNOTATION));
-                                }
-
-
-                            }
-                            if (apiOperation == null) {
-                                error.add(new CheckerResult(methodName + "没有ApiOperation注解", JavaStandardCheckerType.METHOD_ANNOTATION));
-                            } else {
-                                Optional<String> apiOperationValue = getAssignValue("value", apiOperation);
-                                if (!apiOperationValue.isPresent()) {
-                                    error.add(new CheckerResult(methodName + " ApiOperation注解没有value", JavaStandardCheckerType.METHOD_ANNOTATION));
+                        List<JCTree.JCVariableDecl> paramsList = method
+                                .params
+                                .stream()
+                                .filter(i -> !EXCLUDE_PARAM_TYPES
+                                        .contains(((JCTree.JCIdent) i.vartype).name.toString())).collect(Collectors.toList());
+                        if (!paramsList.isEmpty()) {
+                            if (isPost) {
+                                if (paramsList.size() != 1) {
+                                    error.add(new CheckerResult(methodName + "post方法只能有一个参数", JavaStandardCheckerType.METHOD_ANNOTATION));
                                 } else {
-                                    if (apiOperationValueList.contains(apiOperationValue.get())) {
-                                        error.add(new CheckerResult(methodName + " ApiOperation注解的value：" + apiOperationValue.get() + "重复", JavaStandardCheckerType.METHOD_ANNOTATION));
+                                    JCTree.JCVariableDecl param = paramsList.get(0);
+                                    if (!JavaParseUtil.getAnnotation("RequestBody", param.mods).isPresent()) {
+                                        error.add(new CheckerResult(methodName + "post方法入参没有RequestBody", JavaStandardCheckerType.METHOD_ANNOTATION));
                                     } else {
-                                        apiOperationValueList.add(apiOperationValue.get());
+                                        checkDTO(error, methodName, param);
                                     }
-                                }
-                            }
 
-                            List<JCTree.JCVariableDecl> paramsList = method
-                                    .params
-                                    .stream()
-                                    .filter(i -> !EXCLUDE_PARAM_TYPES
-                                            .contains(((JCTree.JCIdent) i.vartype).name.toString())).collect(Collectors.toList());
-                            if (!paramsList.isEmpty()) {
-                                if (isPost) {
+                                }
+                            } else {
+                                boolean isPrimary = paramsList.stream().anyMatch(i -> PRIMARY_PARAM_TYPES.contains(((JCTree.JCIdent) i.vartype).name.toString()));
+
+                                if (isPrimary) {
+                                    if (paramsList.size() > 5) {
+                                        error.add(new CheckerResult(methodName + "get方法最多五个入参", JavaStandardCheckerType.METHOD_PARAM));
+                                    }
+                                    if (paramsList.stream().anyMatch(i -> !PRIMARY_PARAM_TYPES.contains(((JCTree.JCIdent) i.vartype).name.toString()))) {
+                                        error.add(new CheckerResult(methodName + "get方法不能同时有DTO和基本类的入参", JavaStandardCheckerType.METHOD_PARAM));
+                                    }
+                                    for (JCTree.JCVariableDecl param : paramsList) {
+                                        String paramTypeName = ((JCTree.JCIdent) param.vartype).name.toString();
+                                        Optional<JCTree.JCAnnotation> apiParamOptional = JavaParseUtil.getAnnotation("ApiParam", param.mods);
+                                        if (!apiParamOptional.isPresent()) {
+                                            error.add(new CheckerResult(methodName + "基本类型入参 " + paramTypeName + " 没有ApiParam注解", JavaStandardCheckerType.METHOD_PARAM));
+                                        } else {
+                                            JCTree.JCAnnotation apiParam = apiParamOptional.get();
+                                            if (!JavaParseUtil.getAssignValue("value", apiParam).isPresent()) {
+                                                error.add(new CheckerResult(methodName + "基本类型入参 " + paramTypeName + " ApiParam注解没有value", JavaStandardCheckerType.METHOD_PARAM));
+                                            }
+                                            if (!JavaParseUtil.getAssignValue("example", apiParam).isPresent()) {
+                                                error.add(new CheckerResult(methodName + "基本类型入参 " + paramTypeName + " ApiParam注解没有example", JavaStandardCheckerType.METHOD_PARAM));
+                                            }
+                                            if (!JavaParseUtil.getAssignValue("required", apiParam).isPresent()) {
+                                                error.add(new CheckerResult(methodName + "基本类型入参 " + paramTypeName + " ApiParam注解没有required", JavaStandardCheckerType.METHOD_PARAM));
+                                            }
+                                        }
+
+                                    }
+                                } else {
                                     if (paramsList.size() != 1) {
-                                        error.add(new CheckerResult(methodName + "post方法只能有一个参数", JavaStandardCheckerType.METHOD_ANNOTATION));
+                                        error.add(new CheckerResult(methodName + "get方法最多五个入参", JavaStandardCheckerType.METHOD_PARAM));
                                     } else {
                                         JCTree.JCVariableDecl param = paramsList.get(0);
-                                        if (!getAnnotation("RequestBody", param.mods).isPresent()) {
-                                            error.add(new CheckerResult(methodName + "post方法入参没有RequestBody", JavaStandardCheckerType.METHOD_ANNOTATION));
-                                        } else {
-                                            checkDTO(error, methodName, param);
-                                        }
-
+                                        checkDTO(error, methodName, param);
                                     }
-                                } else {
-                                    boolean isPrimary = paramsList.stream().anyMatch(i -> PRIMARY_PARAM_TYPES.contains(((JCTree.JCIdent) i.vartype).name.toString()));
 
-                                    if (isPrimary) {
-                                        if (paramsList.size() > 5) {
-                                            error.add(new CheckerResult(methodName + "get方法最多五个入参", JavaStandardCheckerType.METHOD_PARAM));
-                                        }
-                                        if (paramsList.stream().anyMatch(i -> !PRIMARY_PARAM_TYPES.contains(((JCTree.JCIdent) i.vartype).name.toString()))) {
-                                            error.add(new CheckerResult(methodName + "get方法不能同时有DTO和基本类的入参", JavaStandardCheckerType.METHOD_PARAM));
-                                        }
-                                        for (JCTree.JCVariableDecl param : paramsList) {
-                                            String paramTypeName = ((JCTree.JCIdent) param.vartype).name.toString();
-                                            Optional<JCTree.JCAnnotation> apiParamOptional = getAnnotation("ApiParam", param.mods);
-                                            if (!apiParamOptional.isPresent()) {
-                                                error.add(new CheckerResult(methodName + "基本类型入参 " + paramTypeName + " 没有ApiParam注解", JavaStandardCheckerType.METHOD_PARAM));
-                                            } else {
-                                                JCTree.JCAnnotation apiParam = apiParamOptional.get();
-                                                if (!getAssignValue("value", apiParam).isPresent()) {
-                                                    error.add(new CheckerResult(methodName + "基本类型入参 " + paramTypeName + " ApiParam注解没有value", JavaStandardCheckerType.METHOD_PARAM));
-                                                }
-                                                if (!getAssignValue("example", apiParam).isPresent()) {
-                                                    error.add(new CheckerResult(methodName + "基本类型入参 " + paramTypeName + " ApiParam注解没有example", JavaStandardCheckerType.METHOD_PARAM));
-                                                }
-                                                if (!getAssignValue("required", apiParam).isPresent()) {
-                                                    error.add(new CheckerResult(methodName + "基本类型入参 " + paramTypeName + " ApiParam注解没有required", JavaStandardCheckerType.METHOD_PARAM));
-                                                }
-                                            }
-
-                                        }
-                                    } else {
-                                        if (paramsList.size() != 1) {
-                                            error.add(new CheckerResult(methodName + "get方法最多五个入参", JavaStandardCheckerType.METHOD_PARAM));
-                                        } else {
-                                            JCTree.JCVariableDecl param = paramsList.get(0);
-                                            checkDTO(error, methodName, param);
-                                        }
-
-                                    }
                                 }
                             }
-
                         }
+
                     }
                 }
             }
 
             if (error.size() > 0) {
-                putErrors(packageName + "." + className, error);
+                error.forEach(i -> i.setKey(packageName + "." + className));
+                putErrors(file, error);
             }
         }
     }
@@ -329,7 +294,7 @@ public class JavaStandardChecker {
         if (!paramTypeName.endsWith("DTO")) {
             error.add(new CheckerResult(methodName + " 入参不是DTO", JavaStandardCheckerType.METHOD_PARAM));
         }
-        if (!getAnnotation("Valid", param.mods).isPresent()) {
+        if (!JavaParseUtil.getAnnotation("Valid", param.mods).isPresent()) {
             error.add(new CheckerResult(methodName + " 入参没有Valid", JavaStandardCheckerType.METHOD_PARAM));
         }
     }
@@ -346,7 +311,7 @@ public class JavaStandardChecker {
      * 8、字段的ApiModelProperty必须有value，example属性，dto的必须有required属性
      * 9、dto required=true必须有NotNull注解限定
      */
-    private void siduantongyiModel(JCTree.JCCompilationUnit jcCompilationUnit) {
+    private void siduantongyiModel(String file, JCTree.JCCompilationUnit jcCompilationUnit) {
         List<CheckerResult> error = new ArrayList<>();
         String packageName = jcCompilationUnit.pid.toString();
         Matcher packageMatcher = PACKAGE_PATTERN.matcher(packageName);
@@ -377,14 +342,14 @@ public class JavaStandardChecker {
 
             boolean isAbstract = classPart.toString().contains(" abstract ");
 
-            Optional<JCTree.JCAnnotation> apiModelOptional = getAnnotation("ApiModel", classPart);
+            Optional<JCTree.JCAnnotation> apiModelOptional = JavaParseUtil.getAnnotation("ApiModel", classPart);
             if (!isAbstract) {
                 if (!apiModelOptional.isPresent()) {
                     // 如果没有ApiModel并且不是静态类，则异常
                     error.add(new CheckerResult("不是静态类，且没有@ApiModel", JavaStandardCheckerType.CLASS_ANNOTATION));
                 } else {
                     JCTree.JCAnnotation jcAnnotation = apiModelOptional.get();
-                    Optional<String> assignValue = getAssignValue("value", jcAnnotation);
+                    Optional<String> assignValue = JavaParseUtil.getAssignValue("value", jcAnnotation);
                     if (!assignValue.isPresent()) {
                         error.add(new CheckerResult("ApiModel没有Value", JavaStandardCheckerType.CLASS_ANNOTATION));
                     } else {
@@ -405,25 +370,25 @@ public class JavaStandardChecker {
                 if (!fieldPart.mods.toString().contains("private")) {
                     error.add(new CheckerResult("类字段不是private的", JavaStandardCheckerType.FIELD));
                 }
-                Optional<JCTree.JCAnnotation> apiModelPropertyOptional = getAnnotation("ApiModelProperty", fieldPart.mods);
+                Optional<JCTree.JCAnnotation> apiModelPropertyOptional = JavaParseUtil.getAnnotation("ApiModelProperty", fieldPart.mods);
                 if (!apiModelPropertyOptional.isPresent()) {
                     error.add(new CheckerResult(str + "没有ApiModelProperty注解", JavaStandardCheckerType.FIELD_ANNOTATION));
                 } else {
                     JCTree.JCAnnotation apiModelProperty = apiModelPropertyOptional.get();
-                    if (!getAssignValue("value", apiModelProperty).isPresent()) {
+                    if (!JavaParseUtil.getAssignValue("value", apiModelProperty).isPresent()) {
                         error.add(new CheckerResult(str + " ApiModelProperty 没有value属性", JavaStandardCheckerType.FIELD_ANNOTATION));
                     }
-                    if (!getAssignValue("example", apiModelProperty).isPresent()) {
+                    if (!JavaParseUtil.getAssignValue("example", apiModelProperty).isPresent()) {
                         error.add(new CheckerResult(str + " ApiModelProperty 没有example属性", JavaStandardCheckerType.FIELD_ANNOTATION));
                     }
-                    Optional<String> required = getAssignValue("required", apiModelProperty);
+                    Optional<String> required = JavaParseUtil.getAssignValue("required", apiModelProperty);
                     if (!required.isPresent()) {
                         if (isDTO) {
                             error.add(new CheckerResult(str + " ApiModelProperty 没有required属性", JavaStandardCheckerType.FIELD_ANNOTATION));
                         }
                     } else {
                         if (Objects.equals(required.get(), "true") && isDTO) {
-                            if (!getAnnotation("NotNull", fieldPart.mods).isPresent()) {
+                            if (!JavaParseUtil.getAnnotation("NotNull", fieldPart.mods).isPresent()) {
                                 error.add(new CheckerResult(str + " 是必填字段，但是没有NotNull注解", JavaStandardCheckerType.FIELD_ANNOTATION));
                             }
                         }
@@ -434,13 +399,10 @@ public class JavaStandardChecker {
             }
 
             if (error.size() > 0) {
-                putErrors(packageName + "." + className, error);
+                error.forEach(i -> i.setKey(packageName + "." + className));
+                putErrors(file, error);
             }
         }
-    }
-
-    private Optional<JCTree.JCAnnotation> getAnnotation(String name, JCTree.JCModifiers classPart) {
-        return classPart.annotations.stream().filter(i -> Objects.equals(i.annotationType.toString(), name)).findAny();
     }
 
     private String unicodeToChinese(final String unicode) {
@@ -487,37 +449,5 @@ public class JavaStandardChecker {
                 || ub == Character.UnicodeBlock.HALFWIDTH_AND_FULLWIDTH_FORMS;
     }
 
-    private void putErrors(String key, List<CheckerResult> values) {
-        List<CheckerResult> strings = errors.get(key);
-        if (strings == null) {
-            strings = new ArrayList<>();
-        }
-        strings.addAll(values);
-        errors.put(key, strings);
-    }
-
-    private Optional<String> getAssignValue(String key, JCTree.JCAnnotation annotation) {
-        for (JCTree.JCExpression arg : annotation.args) {
-            if (arg instanceof JCTree.JCLiteral) {
-                if ("value".equals(key)) {
-                    return Optional.of(((JCTree.JCLiteral) arg).value.toString());
-                }
-            } else if (arg instanceof JCTree.JCNewArray && "value".equals(key)) {
-                JCTree.JCNewArray jcNewArray = (JCTree.JCNewArray) arg;
-                return Optional.of(jcNewArray.elems.stream().map(i -> ((JCTree.JCLiteral) i).value.toString()).collect(Collectors.joining(",")));
-            } else {
-                JCTree.JCAssign jcAssign = (JCTree.JCAssign) arg;
-                if (Objects.equals(key, ((JCTree.JCIdent) jcAssign.lhs).name.toString())) {
-                    if (jcAssign.rhs instanceof JCTree.JCNewArray) {
-                        JCTree.JCNewArray jcNewArray = (JCTree.JCNewArray) jcAssign.rhs;
-                        return Optional.of(jcNewArray.elems.stream().map(i -> ((JCTree.JCLiteral) i).value.toString()).collect(Collectors.joining(",")));
-                    } else {
-                        return Optional.of(((JCTree.JCLiteral) jcAssign.rhs).value.toString());
-                    }
-                }
-            }
-        }
-        return Optional.empty();
-    }
 
 }
